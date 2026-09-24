@@ -2,7 +2,7 @@
 
 Lumora (灵屿) is a locally developed macOS notch application.
 
-## 1.4.0
+## 1.0.0
 
 Local build: 2026092303.
 
