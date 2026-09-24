@@ -48,13 +48,9 @@ The collapsed notch stays visually quiet; the glass treatment is limited to the 
 
 ## Install
 
-Build `Lumora.app` from this source tree. A public download has not been configured yet.
+Download the latest `Lumora-1.0.0.dmg` from [GitHub Releases](https://github.com/Con-Benksl/Lumora/releases/latest), open the disk image, and drag `Lumora.app` to `Applications`.
 
-1. Build the app using the instructions below.
-2. Place `Lumora.app` in `Applications`.
-3. Open `Lumora` from `Applications`.
-
-If macOS blocks the first launch, open `System Settings` -> `Privacy & Security`, allow Lumora to run, then open it again.
+The downloadable build is ad-hoc signed and is not notarized. On first launch, Control-click `Lumora.app`, choose **Open**, and confirm. If macOS still blocks it, use `System Settings` -> `Privacy & Security` -> **Open Anyway**. Accessibility and system-audio permissions are requested only when their features are used.
 
 ## Requirements
 

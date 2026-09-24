@@ -1,22 +1,17 @@
 # Lumora Release Notes
 
-Lumora (灵屿) is a locally developed macOS notch application.
-
 ## 1.0.0
 
-Local build: 2026092303.
+Build: 2026092303.
 
-- Rename the application, executable, Xcode target, internal module, and runtime
-  resources to Lumora, with a distinct app identifier and the custom island icon.
-- Keep the Chinese interface, animation refinements, hover handling, and menu bar
-  overlap support.
-- Migrate existing preferences and agent connections to the Lumora names, socket,
-  and hook paths while preserving unrelated agent configuration.
-- Keep small compatibility entry points for hook commands cached by running agent
-  sessions. New configurations register only Lumora, without duplicate callbacks.
-- Maintain Lumora release notes and disable automatic update checks. Preserve
-  applicable licenses and third-party notices.
+First public Lumora release. The app brings live AI coding sessions, music controls, and system status to the MacBook notch.
 
-This is a local build record. It does not indicate a public release, Apple
-notarization, or a published download. macOS permissions apply to the installed
-application identity and may need to be granted again after migration.
+- Supports Claude Code, Codex, OpenCode, and Cursor session monitoring.
+- Includes now-playing metadata, artwork, playback controls, and performance status.
+- Supports macOS 15.6 and later; Glass appearance requires macOS 26, and automatic menu bar avoidance requires macOS 27.
+
+### Download and first launch
+
+Download `Lumora-1.0.0.dmg` from the GitHub release, open it, then drag `Lumora.app` to Applications.
+
+This build is ad-hoc signed and is not notarized. On first launch, Control-click `Lumora.app`, choose Open, and confirm. macOS permissions may need to be granted when you first use Accessibility or system audio features.

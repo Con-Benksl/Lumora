@@ -48,13 +48,9 @@ Lumora 会把不同 agent 的本地事件整理成统一的会话时间线。
 
 ## 安装
 
-请从本仓库构建 `Lumora.app`。目前尚未配置公开下载地址。
+从 [GitHub Releases](https://github.com/Con-Benksl/Lumora/releases/latest) 下载最新的 `Lumora-1.0.0.dmg`，打开磁盘映像，然后把 `Lumora.app` 拖入 `Applications`。
 
-1. 按下面的说明从源码构建。
-2. 将 `Lumora.app` 放入 `Applications`。
-3. 从 `Applications` 打开 `Lumora`。
-
-如果 macOS 首次启动时拦截，可以到 `系统设置` -> `隐私与安全性` 中允许 Lumora 运行，然后重新打开。
+下载版使用 ad-hoc 签名，尚未经过 Apple 公证。首次打开时按住 Control 并点按 `Lumora.app`，选择**打开**并确认。如果 macOS 仍然拦截，可在 `系统设置` -> `隐私与安全性` 中选择**仍要打开**。辅助功能和系统音频权限只会在使用相应功能时请求。
 
 ## 环境要求
 

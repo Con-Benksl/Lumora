@@ -1,0 +1,52 @@
+name: Lumora CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check branding and localization
+        run: |
+          python3 scripts/check-branding.py
+          python3 scripts/check-localization.py
+
+      - name: Run deterministic integration checks
+        run: |
+          set -euo pipefail
+          for script in \
+            LumoraTests/check_chat_cache.py \
+            LumoraTests/check_hook_brand_migration.py \
+            LumoraTests/check_hover.py \
+            LumoraTests/check_list_layout_cache.py \
+            LumoraTests/check_lumora_preferences.py \
+            LumoraTests/check_menu_bar_organizer.py \
+            LumoraTests/check_music_updates.py \
+            LumoraTests/check_native_controls.py \
+            LumoraTests/check_panel_geometry.py \
+            LumoraTests/check_scroll_observer.py \
+            LumoraTests/check_vibe_glow.py; do
+            python3 "${script}"
+          done
+
+      - name: Run Xcode unit tests
+        run: |
+          xcodebuild test \
+            -project Lumora.xcodeproj \
+            -scheme Lumora \
+            -configuration Debug \
+            -derivedDataPath build/CI \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES

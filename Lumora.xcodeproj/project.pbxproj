@@ -353,10 +353,6 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Lumora/Resources/Music",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Lumora/Info.plist;
 				INFOPLIST_KEY_LSUIElement = YES;
@@ -400,10 +396,6 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Lumora/Resources/Music",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Lumora/Info.plist;
 				INFOPLIST_KEY_LSUIElement = YES;

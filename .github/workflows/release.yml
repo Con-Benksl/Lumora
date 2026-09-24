@@ -82,26 +82,42 @@ jobs:
       - name: Check resource references
         run: python3 scripts/check-branding.py
 
-      - name: Build
+      - name: Build and ad-hoc sign
         run: |
           set -euo pipefail
 
-          xcodebuild -scheme Lumora -configuration Release \
+          xcodebuild -project Lumora.xcodeproj -scheme Lumora -configuration Release \
             MACOSX_DEPLOYMENT_TARGET=15.6 \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
             -derivedDataPath build \
             build
 
-      - name: Package DMG
+          APP_PATH="build/Build/Products/Release/Lumora.app"
+          test -d "${APP_PATH}"
+          codesign --verify --deep --strict "${APP_PATH}"
+
+      - name: Package installable DMG
         run: |
           set -euo pipefail
 
           APP_PATH="build/Build/Products/Release/Lumora.app"
+          STAGING_PATH="${GITHUB_WORKSPACE}/dmg-staging"
           DMG_PATH="${GITHUB_WORKSPACE}/Lumora-${VERSION}.dmg"
+          CHECKSUM_PATH="${DMG_PATH}.sha256"
 
+          mkdir -p "${STAGING_PATH}"
+          ditto "${APP_PATH}" "${STAGING_PATH}/Lumora.app"
+          ln -s /Applications "${STAGING_PATH}/Applications"
           hdiutil create -volname "Lumora" \
-            -srcfolder "${APP_PATH}" \
+            -srcfolder "${STAGING_PATH}" \
             -ov -format UDZO \
             "${DMG_PATH}"
+
+          cd "${GITHUB_WORKSPACE}"
+          shasum -a 256 "Lumora-${VERSION}.dmg" > "Lumora-${VERSION}.dmg.sha256"
+          test -s "${CHECKSUM_PATH}"
 
       - name: Create GitHub Release
         env:
@@ -111,6 +127,7 @@ jobs:
 
           gh release create "${TAG_NAME}" \
             "${GITHUB_WORKSPACE}/Lumora-${VERSION}.dmg" \
+            "${GITHUB_WORKSPACE}/Lumora-${VERSION}.dmg.sha256" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Lumora ${VERSION}" \
             --notes-file release-notes-body.md \
