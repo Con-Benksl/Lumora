@@ -22,7 +22,7 @@ struct LumoraApp: App {
                     appDelegate.windowController?.viewModel.handleShortcutAction(.openSettings)
                 }
                 .keyboardShortcut(",")
-                Button("Menu Bar Avoidance…") {
+                Button("Menu Bar Settings…") {
                     MenuBarOrganizer.shared.showSettings()
                 }
             }

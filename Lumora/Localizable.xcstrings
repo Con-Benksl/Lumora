@@ -1589,13 +1589,13 @@
         }
       }
     },
-    "Menu Bar Avoidance…": {
+    "Menu Bar Settings…": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "菜单栏避让…"
+            "value": "菜单栏设置…"
           }
         }
       }

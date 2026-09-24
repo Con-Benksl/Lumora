@@ -231,7 +231,7 @@ struct NotchMenuView: View {
 
                 MenuRow(
                     icon: "menubar.rectangle",
-                    label: String(localized: "Menu Bar Avoidance…"),
+                    label: String(localized: "Menu Bar Settings…"),
                     trailingIcon: "arrow.up.forward",
                     primaryTextColor: primaryTextColor,
                     isFocused: viewModel.settingsFocusedIndex == 13
