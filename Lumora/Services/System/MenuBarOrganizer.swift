@@ -14,7 +14,7 @@ final class MenuBarOrganizer: ObservableObject {
     @Published private(set) var needsAccessibility = false
 
     var usesSystemMenuBar: Bool {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
+        Foundation.ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
     }
 
     private let systemMonitor = SystemMenuBarMonitor()
