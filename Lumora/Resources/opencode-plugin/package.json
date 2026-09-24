@@ -1,0 +1,13 @@
+{
+  "name": "lumora",
+  "version": "1.0.0",
+  "description": "Forwards OpenCode lifecycle events to the Lumora dynamic island",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    "./server": "./index.js"
+  },
+  "engines": {
+    "opencode": ">=1.0.0"
+  }
+}

@@ -1,0 +1,334 @@
+//
+//  ChatHistoryManager.swift
+//  Lumora
+//
+
+import Combine
+import Foundation
+
+@MainActor
+class ChatHistoryManager: ObservableObject {
+    static let shared = ChatHistoryManager()
+
+    @Published private(set) var histories: [String: [ChatHistoryItem]] = [:]
+    @Published private(set) var agentDescriptions: [String: [String: String]] = [:]
+
+    private var loadedSessions: Set<String> = []
+    private var cancellables = Set<AnyCancellable>()
+
+    private init() {
+        SessionStore.shared.sessionsPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] sessions in
+                self?.updateFromSessions(sessions)
+            }
+            .store(in: &cancellables)
+    }
+
+    // MARK: - Public API
+
+    func history(for sessionId: String) -> [ChatHistoryItem] {
+        histories[sessionId] ?? []
+    }
+
+    func isLoaded(sessionId: String) -> Bool {
+        loadedSessions.contains(sessionId)
+    }
+
+    func loadFromFile(sessionId: String, cwd: String, force: Bool = false) async {
+        guard force || !loadedSessions.contains(sessionId) else { return }
+        loadedSessions.insert(sessionId)
+        await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
+    }
+
+    func syncFromFile(sessionId: String, cwd: String) async {
+        let messages = await ConversationParser.shared.parseFullConversation(
+            sessionId: sessionId,
+            cwd: cwd
+        )
+        let completedTools = await ConversationParser.shared.completedToolIds(for: sessionId)
+        let toolResults = await ConversationParser.shared.toolResults(for: sessionId)
+        let structuredResults = await ConversationParser.shared.structuredResults(for: sessionId)
+
+        let payload = FileUpdatePayload(
+            sessionId: sessionId,
+            cwd: cwd,
+            messages: messages,
+            isIncremental: false,  // Full sync
+            completedToolIds: completedTools,
+            toolResults: toolResults,
+            structuredResults: structuredResults
+        )
+
+        await SessionStore.shared.process(.fileUpdated(payload))
+    }
+
+    func clearHistory(for sessionId: String) {
+        loadedSessions.remove(sessionId)
+        histories.removeValue(forKey: sessionId)
+        Task {
+            await SessionStore.shared.process(.sessionEnded(sessionId: sessionId))
+        }
+    }
+
+    // MARK: - State Updates
+
+    private func updateFromSessions(_ sessions: [SessionState]) {
+        var newHistories = histories
+        var newAgentDescriptions = agentDescriptions
+        for session in sessions {
+            let filteredItems = filterOutSubagentTools(session.chatItems)
+            newHistories[session.sessionId] = filteredItems
+            newAgentDescriptions[session.sessionId] = session.subagentState.agentDescriptions
+            loadedSessions.insert(session.sessionId)
+        }
+        histories = newHistories
+        agentDescriptions = newAgentDescriptions
+    }
+
+    private func filterOutSubagentTools(_ items: [ChatHistoryItem]) -> [ChatHistoryItem] {
+        var subagentToolIds = Set<String>()
+        for item in items {
+            if case .toolCall(let tool) = item.type, tool.isSubagentContainer {
+                for subagentTool in tool.subagentTools {
+                    subagentToolIds.insert(subagentTool.id)
+                }
+            }
+        }
+
+        return items.filter { !subagentToolIds.contains($0.id) }
+    }
+}
+
+// MARK: - Models
+
+struct ChatHistoryItem: Identifiable, Equatable, Sendable {
+    let id: String
+    let type: ChatHistoryItemType
+    let timestamp: Date
+
+    static func == (lhs: ChatHistoryItem, rhs: ChatHistoryItem) -> Bool {
+        lhs.id == rhs.id && lhs.type == rhs.type
+    }
+}
+
+enum ChatHistoryItemType: Equatable, Sendable {
+    case user(String)
+    case assistant(String)
+    case toolCall(ToolCallItem)
+    case thinking(String)
+    case image(ImageBlock)
+    case interrupted
+}
+
+struct ToolCallItem: Equatable, Sendable {
+    let name: String
+    let input: [String: String]
+    var status: ToolStatus
+    var result: String?
+    var structuredResult: ToolResultData?
+
+    /// For Task tools: nested subagent tool calls
+    var subagentTools: [SubagentToolCall]
+
+    // MARK: - Provider-agnostic tool kind
+    //
+    // The classification itself lives in `Models/ToolKind.swift` so it
+    // can be referenced from both Models (SessionPhase, ToolResultData)
+    // and Services without a reverse dependency. `name` is kept as the
+    // provider's original string (used for display and Equatable), but
+    // every behavior switch MUST route through `kind` (or `kind(of:)`)
+    // to avoid the case-sensitivity bug where opencode rows silently
+    // fall through to default / "Running...".
+    nonisolated var kind: ToolKind {
+        ToolKind.classify(name)
+    }
+
+    /// Static shim preserved for call sites that don't have a
+    /// `ToolCallItem` in hand (e.g. matching a `HookEvent.tool`
+    /// string). Prefer `ToolKind.classify` directly in new code.
+    nonisolated static func kind(of name: String?) -> ToolKind {
+        ToolKind.classify(name)
+    }
+
+    /// Whether this tool is the subagent-container tool. "Task" is the
+    /// legacy name; Claude Code now uses "Agent"; opencode uses "task".
+    nonisolated var isSubagentContainer: Bool {
+        Self.isSubagentContainerName(name)
+    }
+
+    /// Same check by raw tool-name string (used when we don't have a
+    /// ToolCallItem — e.g. when matching against `HookEvent.tool`).
+    /// Case-insensitive — opencode emits "task" lowercase.
+    nonisolated static func isSubagentContainerName(_ name: String?) -> Bool {
+        guard let n = name?.lowercased() else { return false }
+        return n == "task" || n == "agent"
+    }
+
+    /// Preview text for the tool (input-based)
+    var inputPreview: String {
+        if let filePath = input["file_path"] ?? input["path"] {
+            return URL(fileURLWithPath: filePath).lastPathComponent
+        }
+        if let command = input["command"] {
+            let firstLine = command.components(separatedBy: "\n").first ?? command
+            return String(firstLine.prefix(60))
+        }
+        if let pattern = input["pattern"] {
+            return pattern
+        }
+        if let query = input["query"] {
+            return query
+        }
+        if let url = input["url"] {
+            return url
+        }
+        if let agentId = input["agentId"] {
+            let blocking = input["block"] == "true"
+            return blocking ? String(localized: "Waiting...") : String(localized: "Checking \(String(agentId.prefix(8)))...")
+        }
+        // AskUserQuestion: input["questions"] is a JSON-serialized array.
+        // Extract the first question text + option count for a human-readable
+        // preview instead of showing raw JSON like [{"question":"...","options":...}].
+        if kind == .askUserQuestion, let questionsJson = input["questions"],
+           let data = questionsJson.data(using: .utf8),
+           let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+           let firstQuestion = array.first?["question"] as? String {
+            // Append option count hint (e.g. "请选择一个选项 (3 个选项)")
+            let optionCount = (array.first?["options"] as? [[String: Any]])?.count ?? 0
+            if optionCount > 0 {
+                return String(localized: "\(firstQuestion) (\(optionCount) options)")
+            }
+            return firstQuestion
+        }
+        return input.values.first.map { String($0.prefix(60)) } ?? ""
+    }
+
+    /// Status display text for the tool
+    var statusDisplay: ToolStatusDisplay {
+        if status == .running {
+            return ToolStatusDisplay.running(for: name, input: input)
+        }
+        if status == .waitingForApproval {
+            return ToolStatusDisplay(text: String(localized: "Waiting for approval..."), isRunning: true)
+        }
+        if status == .interrupted {
+            return ToolStatusDisplay(text: String(localized: "Interrupted"), isRunning: false)
+        }
+        return ToolStatusDisplay.completed(for: name, result: structuredResult)
+    }
+
+    // Custom Equatable implementation to handle structuredResult
+    static func == (lhs: ToolCallItem, rhs: ToolCallItem) -> Bool {
+        lhs.name == rhs.name &&
+        lhs.input == rhs.input &&
+        lhs.status == rhs.status &&
+        lhs.result == rhs.result &&
+        lhs.structuredResult == rhs.structuredResult &&
+        lhs.subagentTools == rhs.subagentTools
+    }
+}
+
+/// Provider-agnostic classification of a tool name now lives in
+/// `Models/ToolKind.swift`. Refer to it via `ToolCallItem.kind` or
+/// `ToolKind.classify(...)` directly.
+
+enum ToolStatus: Sendable, CustomStringConvertible {
+    case running
+    case waitingForApproval
+    case success
+    case error
+    case interrupted
+
+    nonisolated var description: String {
+        switch self {
+        case .running: return "running"
+        case .waitingForApproval: return "waitingForApproval"
+        case .success: return "success"
+        case .error: return "error"
+        case .interrupted: return "interrupted"
+        }
+    }
+}
+
+// Explicit nonisolated Equatable conformance to avoid actor isolation issues
+extension ToolStatus: Equatable {
+    nonisolated static func == (lhs: ToolStatus, rhs: ToolStatus) -> Bool {
+        switch (lhs, rhs) {
+        case (.running, .running): return true
+        case (.waitingForApproval, .waitingForApproval): return true
+        case (.success, .success): return true
+        case (.error, .error): return true
+        case (.interrupted, .interrupted): return true
+        default: return false
+        }
+    }
+}
+
+// MARK: - Subagent Tool Call
+
+/// Represents a tool call made by a subagent (Task tool)
+struct SubagentToolCall: Equatable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let input: [String: String]
+    var status: ToolStatus
+    let timestamp: Date
+
+    /// Short description for display
+    var displayText: String {
+        // Provider-agnostic — opencode emits lowercase ("bash", "read",
+        // "edit", "write", "grep", "glob", "webfetch", "websearch") while
+        // Claude emits PascalCase. Switch on kind so both providers show
+        // the actual file path / command / pattern / url / etc. instead
+        // of falling through to the raw tool name.
+        switch ToolCallItem.kind(of: name) {
+        case .read:
+            if let path = input["file_path"] {
+                return URL(fileURLWithPath: path).lastPathComponent
+            }
+            return String(localized: "Reading...")
+        case .grep:
+            if let pattern = input["pattern"] {
+                return "grep: \(pattern)"
+            }
+            return String(localized: "Searching...")
+        case .glob:
+            if let pattern = input["pattern"] {
+                return "glob: \(pattern)"
+            }
+            return String(localized: "Finding files...")
+        case .bash:
+            if let desc = input["description"] {
+                return desc
+            }
+            if let cmd = input["command"] {
+                let firstLine = cmd.components(separatedBy: "\n").first ?? cmd
+                return String(firstLine.prefix(40))
+            }
+            return String(localized: "Running command...")
+        case .edit:
+            if let path = input["file_path"] {
+                return String(localized: "Edit: \(URL(fileURLWithPath: path).lastPathComponent)")
+            }
+            return String(localized: "Editing...")
+        case .write:
+            if let path = input["file_path"] {
+                return String(localized: "Write: \(URL(fileURLWithPath: path).lastPathComponent)")
+            }
+            return String(localized: "Writing...")
+        case .webFetch:
+            if let url = input["url"] {
+                return String(localized: "Fetching: \(String(url.prefix(30)))...")
+            }
+            return String(localized: "Fetching...")
+        case .webSearch:
+            if let query = input["query"] {
+                return String(localized: "Search: \(String(query.prefix(30)))")
+            }
+            return String(localized: "Searching web...")
+        default:
+            return name
+        }
+    }
+}

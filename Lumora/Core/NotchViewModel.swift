@@ -1,0 +1,909 @@
+//
+//  NotchViewModel.swift
+//  Lumora
+//
+//  State management for the dynamic island
+//
+
+import AppKit
+import Combine
+import SwiftUI
+
+enum NotchStatus: Equatable {
+    case closed
+    case opened
+    case popping
+}
+
+enum NotchOpenReason {
+    case keyboard
+    case click
+    case hover
+    case notification
+    case boot
+    case unknown
+}
+
+enum PerformanceSection: String, CaseIterable, Hashable {
+    case overview
+    case cpu
+    case memory
+    case battery
+    case network
+
+    var title: String {
+        switch self {
+        case .overview: return String(localized: "Performance")
+        case .cpu: return String(localized: "CPU")
+        case .memory: return String(localized: "Memory")
+        case .battery: return String(localized: "Battery")
+        case .network: return String(localized: "Network")
+        }
+    }
+
+    /// Static SF Symbol used in settings UI (battery icon is dynamic in live views).
+    var settingsIcon: String {
+        switch self {
+        case .overview: return "gauge.with.dots.needle.33percent"
+        case .cpu: return "cpu"
+        case .memory: return "memorychip"
+        case .battery: return "battery.100"
+        case .network: return "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    /// All detail sections in fixed display order (excludes `.overview`).
+    static var detailAll: [PerformanceSection] { [.cpu, .memory, .battery, .network] }
+}
+
+enum NotchContentType: Equatable {
+    case instances
+    case menu
+    case shortcuts
+    case agents
+    case performanceSettings
+    case betaFeatures
+    case performance(PerformanceSection)
+    case chat(SessionState)
+
+    var id: String {
+        switch self {
+        case .instances: return "instances"
+        case .menu: return "menu"
+        case .shortcuts: return "shortcuts"
+        case .agents: return "agents"
+        case .performanceSettings: return "performanceSettings"
+        case .betaFeatures: return "betaFeatures"
+        case .performance(let section): return "performance-\(section.rawValue)"
+        case .chat(let session): return "chat-\(session.sessionId)"
+        }
+    }
+}
+
+enum ChatScrollDirection {
+    case up
+    case down
+    /// Vim-style page up (⌃B). Scrolls by viewport height with a small overlap.
+    case pageUp
+    /// Vim-style page down (⌃F). Scrolls by viewport height with a small overlap.
+    case pageDown
+    case bottom
+}
+
+@MainActor
+class NotchViewModel: ObservableObject {
+    // MARK: - Published State
+
+    @Published var status: NotchStatus = .closed
+    @Published private(set) var isClosing = false
+    @Published var openReason: NotchOpenReason = .unknown
+    @Published var contentType: NotchContentType = .instances
+    @Published var isHovering: Bool = false
+    @Published var instancesPageHasSessions: Bool = false
+    @Published var instancesPageSessionCount: Int = 0
+    @Published var instancesPageShowsPerformance: Bool = false
+    @Published var instancesPageShowsMusic: Bool = false
+    @Published var instancesPageRowHeight: CGFloat = 0
+    @Published var instancesPagePerformanceRowHeight: CGFloat = 0
+    @Published var instancesPageMusicCardHeight: CGFloat = 0
+    @Published var animatedTopCornerRadius: CGFloat = 6
+    @Published var animatedBottomCornerRadius: CGFloat = 12
+    /// Extra width beyond device notch for closed state activity indicators (music, processing, etc.)
+    @Published var closedNotchExpansionWidth: CGFloat = 0
+    @Published var navigationStack: [NotchContentType] = []
+    /// Index for keyboard-driven session selection in the instances view
+    @Published var keyboardSelectedIndex: Int = -1
+    /// Trigger to activate the currently keyboard-selected session
+    @Published var keyboardActivateTrigger: UUID?
+
+    /// Focused row index for keyboard navigation on settings pages (menu, shortcuts).
+    @Published var settingsFocusedIndex: Int = -1
+    /// Live-measured content height of the menu VStack (via GeometryReader).
+    @Published var menuContentHeight: CGFloat = 552
+    /// Live-measured content height of the agents page VStack (via GeometryReader).
+    /// Default is sized for the typical "all 3 providers installed, no picker" state so
+    /// the panel doesn't have to grow on first appearance (which would briefly show a
+    /// scrollbar while content overflows the still-shrinking frame).
+    @Published var agentsContentHeight: CGFloat = 380
+    /// Captured base height of the agents page (no picker expanded), as
+    /// last measured by the GeometryReader. Persisted so navigation
+    /// round-trips (agents → menu → agents) can reset `agentsContentHeight`
+    /// back to the correct baseline instead of either defaulting to 380
+    /// or carrying over the stale `+= expandedHeight` from the previous
+    /// session. See `AgentSettingsView.onPreferenceChange`.
+    @Published var agentsBaseHeight: CGFloat = 380
+    /// Live-measured content height of the performance settings page VStack.
+    /// Default covers the "Visible Metrics" row collapsed state.
+    @Published var performanceSettingsContentHeight: CGFloat = 230
+    /// Live-measured content heights of performance pages, keyed by section.
+    @Published var performanceContentHeights: [PerformanceSection: CGFloat] = [:]
+
+    // MARK: - Dependencies
+
+    /// The app that was frontmost before Lumora took focus (for restoring on close).
+    private(set) var previousActiveApp: NSRunningApplication?
+
+    // MARK: - Geometry
+
+    let geometry: NotchGeometry
+    let spacing: CGFloat = 12
+    let hasPhysicalNotch: Bool
+
+    var deviceNotchRect: CGRect { geometry.deviceNotchRect }
+    var screenRect: CGRect { geometry.screenRect }
+    var windowHeight: CGFloat { geometry.windowHeight }
+
+    /// Bottom margin kept clear of the screen edge so the panel never
+    /// bleeds into the dock / menu bar. The window itself is already
+    /// sized to the usable area, but `geometry.windowHeight` is the
+    /// hard upper bound on the panel — capping `openedSize.height` to
+    /// it prevents the panel from being clipped on small screens (e.g.
+    /// 13" MacBook) when the menu has a tall Sound picker expanded.
+    private let panelBottomMargin: CGFloat = 16
+
+    /// Dynamic opened size based on content type
+    var openedSize: CGSize {
+        switch contentType {
+        case .chat:
+            // Large size for chat view
+            return CGSize(
+                width: min(screenRect.width * 0.5, 600),
+                height: 580
+            )
+        case .menu:
+            // Height = compile-time-derived VStack content (sum of static
+            // row layout + expanded picker heights, see PageLayout /
+            // PickerLayout in SettingsPageLayout.swift) + header + 12pt
+            // trailing gap. Panel maxHeight and ScrollView contentSize
+            // are mathematically equal at every frame, so no buffer is
+            // needed and the scrollbar never flashes.
+            //
+            // `panelBottomMargin` reserves clearance at the screen
+            // bottom. On smaller screens (e.g. 13" MacBook, ~900pt
+            // window) the Sound picker pushes the panel past the
+            // window; without the cap the panel is clipped and the
+            // OUTER ScrollView shows a permanent scrollbar. Capping
+            // here keeps the panel inside the window — when content
+            // overflows the cap, the outer scrollbar appears as
+            // expected (`showsIndicators: true`).
+            //
+            // `settingsPageHeaderHeight(for:)` is the SINGLE source of
+            // truth for the header height — see `SettingsPageLayout.swift`
+            // for the full rationale and the 2026-07-06 `1pt overflow`
+            // bug that motivated this helper. Do NOT inline
+            // `max(24, geometry.deviceNotchRect.height)` here.
+            let actualHeaderHeight = settingsPageHeaderHeight(for: geometry)
+            let raw = menuContentHeight + actualHeaderHeight + 12
+            let maxHeight = max(0, geometry.windowHeight - panelBottomMargin)
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: min(raw, maxHeight)
+            )
+        case .shortcuts:
+            // Compile-time `PageLayout` matches the menu / agents /
+            // performanceSettings pattern: panel height = sum of row
+            // heights + dividers + VStack spacings + outer padding +
+            // header + 12pt trailing gap (see `panelHeightForPage`).
+            //
+            // Previous hardcoded `480` (the "446 → 480" comment in the
+            // old code) overshot the actual content by ~44pt — visible
+            // as a blank band at the bottom of the panel. The `40pt`
+            // estimate for `ShortcutRow` was wrong; structurally
+            // `ShortcutRow` is identical to `MenuRow` (13pt label +
+            // 12pt SF Symbol icon + 10/10 vertical padding → ~36pt
+            // row), so it matches `menuRowHeight` exactly.
+            //
+            // `shortcutsItemCount` (1 Back + 7 actions + 1 Reset = 9)
+            // is the SOI for the row count — see `shortcutsItemCount`
+            // computed var below.
+            let pageLayout = PageLayout(
+                rowCount: shortcutsItemCount,
+                dividerCount: 2
+            )
+            let raw = panelHeightForPage(
+                pageLayout: pageLayout,
+                expandedPickerHeights: [],
+                geometry: geometry
+            )
+            let maxHeight = max(0, geometry.windowHeight - panelBottomMargin)
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: min(raw, maxHeight)
+            )
+        case .agents:
+            let headerHeight = settingsPageHeaderHeight(for: geometry)
+            let raw = agentsContentHeight + headerHeight + 12
+            let maxHeight = max(0, geometry.windowHeight - panelBottomMargin)
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: min(raw, maxHeight)
+            )
+        case .performanceSettings:
+            let headerHeight = settingsPageHeaderHeight(for: geometry)
+            let raw = performanceSettingsContentHeight + headerHeight + 12
+            let maxHeight = max(0, geometry.windowHeight - panelBottomMargin)
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: min(raw, maxHeight)
+            )
+        case .betaFeatures:
+            let raw = panelHeightForPage(
+                pageLayout: BetaFeaturesSettingsLayout.pageLayout,
+                expandedPickerHeights: [],
+                geometry: geometry
+            )
+            let maxHeight = max(0, geometry.windowHeight - panelBottomMargin)
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: min(raw, maxHeight)
+            )
+        case .performance(let section):
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: performanceHeight(for: section)
+            )
+        case .instances:
+            return CGSize(
+                width: min(screenRect.width * 0.4, 480),
+                height: instancesPageOpenedHeight
+            )
+        }
+    }
+
+    // MARK: - Animation
+
+    var animation: Animation {
+        .easeOut(duration: 0.25)
+    }
+
+    // MARK: - Private
+
+    private var cancellables = Set<AnyCancellable>()
+    private let events = EventMonitors.shared
+    private var hoverTimer: DispatchWorkItem?
+    private var hoverCloseTimer: DispatchWorkItem?
+    private var lastMouseLocation: CGPoint?
+    private var closingID: UUID?
+    let panelPresentation = PanelPresentation()
+
+    /// While closing, the visible frame remains interactive until it settles.
+    var interactionSize: CGSize {
+        if isClosing { return panelPresentation.size ?? openedSize }
+        return status == .opened ? openedSize
+            : geometry.closedPanelSize(expansionWidth: closedNotchExpansionWidth)
+    }
+    /// Set when the notch is closing due to a click on the notch area,
+    /// so the redundant SwiftUI onTapGesture can skip re-opening it.
+    var closedByTapAt: Date?
+    /// Suppresses the next mouseDown-triggered close (e.g. for alert buttons 
+    /// that may be positioned outside the panel bounds).
+    var suppressMouseDownClose: Bool = false
+
+
+    private enum InstancesPageLayout {
+        static let contentSpacing: CGFloat = 8
+        static let targetVisibleRows: CGFloat = 3.2
+        static let listRowSpacing: CGFloat = 2
+        static let emptyStateHeight: CGFloat = 84
+        static let emptyHeight: CGFloat = 112
+        static let emptyHeightWithMusic: CGFloat = 228
+        static let fallbackRowHeight: CGFloat = 58
+        static let fallbackPerformanceRowHeight: CGFloat = 44
+        static let fallbackMusicBlockHeight: CGFloat = emptyHeightWithMusic - emptyHeight
+    }
+
+    // MARK: - Initialization
+
+    init(deviceNotchRect: CGRect, screenRect: CGRect, windowHeight: CGFloat, hasPhysicalNotch: Bool) {
+        self.geometry = NotchGeometry(
+            deviceNotchRect: deviceNotchRect,
+            screenRect: screenRect,
+            windowHeight: windowHeight
+        )
+        self.hasPhysicalNotch = hasPhysicalNotch
+        setupEventHandlers()
+    }
+
+    private var instancesPageOpenedHeight: CGFloat {
+        let chromeHeight = settingsPageHeaderHeight(for: geometry) + 12
+        let performanceBlockHeight: CGFloat = instancesPageShowsPerformance
+            ? resolvedPerformanceRowHeight + InstancesPageLayout.contentSpacing
+            : 0
+        let musicBlockHeight: CGFloat = instancesPageShowsMusic
+            ? resolvedMusicCardHeight + InstancesPageLayout.contentSpacing
+            : 0
+
+        let contentHeight: CGFloat
+        if instancesPageSessionCount > 0 {
+            contentHeight = listHeight(
+                rowHeight: resolvedRowHeight,
+                visibleRows: min(CGFloat(instancesPageSessionCount), InstancesPageLayout.targetVisibleRows)
+            )
+        } else {
+            contentHeight = InstancesPageLayout.emptyStateHeight
+        }
+
+        return chromeHeight + performanceBlockHeight + musicBlockHeight + contentHeight
+    }
+
+    private var resolvedRowHeight: CGFloat {
+        max(instancesPageRowHeight, InstancesPageLayout.fallbackRowHeight)
+    }
+
+    private var resolvedMusicCardHeight: CGFloat {
+        max(instancesPageMusicCardHeight, InstancesPageLayout.fallbackMusicBlockHeight - InstancesPageLayout.contentSpacing)
+    }
+
+    private var resolvedPerformanceRowHeight: CGFloat {
+        max(instancesPagePerformanceRowHeight, InstancesPageLayout.fallbackPerformanceRowHeight)
+    }
+
+    private func performanceHeight(for section: PerformanceSection) -> CGFloat {
+        let headerHeight = settingsPageHeaderHeight(for: geometry)
+        let contentHeight = performanceContentHeights[section] ?? fallbackPerformanceContentHeight(for: section)
+        return min(contentHeight + headerHeight + 12, 560)
+    }
+
+    private func fallbackPerformanceContentHeight(for section: PerformanceSection) -> CGFloat {
+        let headerHeight = settingsPageHeaderHeight(for: geometry)
+        let chromeHeight = headerHeight + 12
+
+        switch section {
+        case .overview:
+            return 470 - chromeHeight
+        case .cpu:
+            return 500 - chromeHeight
+        case .memory:
+            return 560 - chromeHeight
+        case .battery:
+            return 450 - chromeHeight
+        case .network:
+            return 500 - chromeHeight
+        }
+    }
+
+    func updatePerformanceContentHeight(_ height: CGFloat, for section: PerformanceSection) {
+        let sanitizedHeight = max(0, height)
+        if abs((performanceContentHeights[section] ?? 0) - sanitizedHeight) > 0.5 {
+            performanceContentHeights[section] = sanitizedHeight
+        }
+    }
+
+    private func listHeight(rowHeight: CGFloat, visibleRows: CGFloat) -> CGFloat {
+        let clampedVisibleRows = max(0, visibleRows)
+        let visibleRowsHeight = rowHeight * clampedVisibleRows
+        let visibleSpacingCount = max(0, ceil(clampedVisibleRows) - 1)
+        let spacingHeight = InstancesPageLayout.listRowSpacing * visibleSpacingCount
+        return visibleRowsHeight + spacingHeight
+    }
+
+    // MARK: - Event Handling
+
+    private func setupEventHandlers() {
+        events.mouseLocation
+            .throttle(for: .milliseconds(50), scheduler: DispatchQueue.main, latest: true)
+            .sink { [weak self] location in
+                self?.handleMouseMove(location)
+            }
+            .store(in: &cancellables)
+
+        events.mouseDown
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.handleMouseDown()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Whether we're in chat mode (sticky behavior)
+    private var isInChatMode: Bool {
+        if case .chat = contentType { return true }
+        return false
+    }
+
+    /// The chat session we're viewing (persists across close/open)
+    private var currentChatSession: SessionState?
+
+    private func handleMouseMove(_ location: CGPoint) {
+        let previousLocation = lastMouseLocation
+        lastMouseLocation = location
+        // A native folder picker temporarily owns the pointer and focus.
+        guard NSApp.modalWindow == nil, !MenuBarOrganizer.shared.isExpanded, !MenuBarOrganizer.shared.isYieldingToSystem else {
+            cancelHoverOpen()
+            cancelHoverClose()
+            return
+        }
+        if isClosing, let previousLocation,
+           !geometry.isPointInOpenedPanel(previousLocation, size: interactionSize),
+           geometry.isPointInOpenedPanel(location, size: interactionSize) {
+            notchOpen(reason: .hover)
+            return
+        }
+        let newHovering = status == .opened
+            ? geometry.isPointInOpenedPanel(location, size: openedSize)
+            : geometry.isPointInNotch(location, expansionWidth: closedNotchExpansionWidth)
+        // Reproject BOTH pointer positions into the current bounds. A shorter
+        // page can move the boundary past a stationary pointer; that is not an exit.
+        let wasHovering = status == .opened
+            ? previousLocation.map { geometry.isPointInOpenedPanel($0, size: openedSize) } ?? isHovering
+            : isHovering
+        if newHovering != isHovering { isHovering = newHovering }
+        guard newHovering != wasHovering else { return }
+
+        cancelHoverOpen()
+        cancelHoverClose()
+
+        // A short dwell prevents accidental opens while crossing the menu bar.
+        if isHovering && (status == .closed || status == .popping) {
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self, self.isHovering, NSApp.modalWindow == nil,
+                      !MenuBarOrganizer.shared.isExpanded, !MenuBarOrganizer.shared.isYieldingToSystem,
+                      self.status == .closed || self.status == .popping else { return }
+                self.notchOpen(reason: .hover)
+            }
+            hoverTimer = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+        } else if !isHovering && status == .opened {
+            let exitSize = openedSize
+            let exitPage = contentType.id
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.hoverCloseTimer = nil
+                // Mouse events are throttled. Read the live pointer again so
+                // a return just before this deadline never closes the panel.
+                guard self.status == .opened, !self.isHovering,
+                      NSApp.modalWindow == nil, !MenuBarOrganizer.shared.isExpanded, !MenuBarOrganizer.shared.isYieldingToSystem
+                else { return }
+                let liveLocation = NSEvent.mouseLocation
+                let isInside = self.geometry.isPointInOpenedPanel(liveLocation, size: self.openedSize)
+                if isInside || self.openedSize != exitSize || self.contentType.id != exitPage {
+                    // A return or a newly sized page invalidates the old exit.
+                    self.lastMouseLocation = liveLocation
+                    self.isHovering = isInside
+                    return
+                }
+                self.notchClose(restorePreviousApp: NSApp.isActive)
+            }
+            hoverCloseTimer = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+        }
+    }
+
+    private func cancelHoverOpen() {
+        hoverTimer?.cancel()
+        hoverTimer = nil
+    }
+
+    private func cancelHoverClose() {
+        hoverCloseTimer?.cancel()
+        hoverCloseTimer = nil
+    }
+
+    private func handleMouseDown() {
+        // Mouse moves are throttled; capture the click before it navigates to
+        // a shorter page, even if the preceding move has not arrived yet.
+        let location = NSEvent.mouseLocation
+        lastMouseLocation = location
+        // Clicks in a native picker/alert belong to that modal, not this panel.
+        guard NSApp.modalWindow == nil, !MenuBarOrganizer.shared.isExpanded, !MenuBarOrganizer.shared.isYieldingToSystem else {
+            cancelHoverOpen()
+            cancelHoverClose()
+            return
+        }
+        if suppressMouseDownClose {
+            suppressMouseDownClose = false
+            return
+        }
+
+        if isClosing && geometry.isPointInOpenedPanel(location, size: interactionSize) {
+            notchOpen(reason: .click)
+            return
+        }
+
+        switch status {
+        case .opened:
+            if geometry.isPointOutsidePanel(location, size: openedSize) {
+                notchClose()
+            } else if geometry.notchScreenRect.contains(location) {
+                // Clicking notch while opened - only close if NOT in chat mode
+                if !isInChatMode {
+                    notchClose()
+                    closedByTapAt = Date()
+                }
+            }
+        case .closed, .popping:
+            if geometry.isPointInNotch(location, expansionWidth: closedNotchExpansionWidth) {
+                notchOpen(reason: .click)
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    func notchOpen(reason: NotchOpenReason = .unknown) {
+        cancelHoverOpen()
+        cancelHoverClose()
+        guard !MenuBarOrganizer.shared.isYieldingToSystem else { return }
+        if MenuBarOrganizer.shared.isExpanded {
+            // Menu-bar pointer traffic belongs to the revealed icons. An explicit
+            // keyboard open returns control to Lumora; notifications never interrupt.
+            guard reason == .keyboard || reason == .unknown else { return }
+            MenuBarOrganizer.shared.hide()
+        }
+        let resumeClosingPage = isClosing && reason != .notification
+        closingID = nil
+        isClosing = false
+        openReason = reason
+        guard status != .opened else { return }
+
+        keyboardActivateTrigger = nil
+        if reason != .notification, previousActiveApp == nil {
+            previousActiveApp = NSWorkspace.shared.frontmostApplication
+        }
+
+        // Resolve the next page before expanding. Closing keeps the outgoing
+        // page intact, so its text never reflows into the smaller list width.
+        if !resumeClosingPage {
+            navigationStack.removeAll()
+            if reason == .notification {
+                currentChatSession = nil
+            }
+            if contentType == .agents {
+                agentsClaudeDirPickerExpanded = false
+                agentsContentHeight = agentsBaseHeight
+            }
+            contentType = currentChatSession.map { .chat($0) } ?? .instances
+        }
+        // Keyboard/notification opens can happen with the pointer elsewhere.
+        // Only a subsequent inside-to-outside crossing should auto-dismiss.
+        let location = NSEvent.mouseLocation
+        lastMouseLocation = location
+        isHovering = geometry.isPointInOpenedPanel(location, size: openedSize)
+
+        withAnimation(.panelOpen) {
+            status = .opened
+            animatedTopCornerRadius = 12
+            animatedBottomCornerRadius = 24
+        }
+    }
+
+    /// Close the notch.
+    ///
+    /// - Parameter restorePreviousApp: When `true`, reactivate the app that was
+    ///   frontmost before Lumora took focus. Pass `true` only when closing via
+    ///   keyboard shortcut or pointer exit while Lumora is active. Mouse-click
+    ///   close must not yank focus back from the app the user just clicked.
+    ///
+    /// `previousActiveApp` is cleared on every close so the next open captures
+    /// fresh state (otherwise a stale reference could be restored later).
+    func notchClose(restorePreviousApp: Bool = false) {
+        cancelHoverOpen()
+        cancelHoverClose()
+        guard status == .opened else { return }
+        // Save chat session before closing if in chat mode
+        if case .chat(let session) = contentType {
+            currentChatSession = session
+        }
+        let id = UUID()
+        closingID = id
+        isClosing = true
+        withAnimation(.panelClose, completionCriteria: .removed) {
+            status = .closed
+            animatedTopCornerRadius = 6
+            animatedBottomCornerRadius = 12
+        } completion: { [weak self] in
+            guard let self, self.closingID == id else { return }
+            self.closingID = nil
+            self.isClosing = false
+            self.navigationStack.removeAll()
+        }
+
+        // Always clear captured reference, regardless of whether we restore —
+        // mouse-close paths drop the focus but must not leave stale state for
+        // a future shortcut close to pick up.
+        let captured = previousActiveApp
+        previousActiveApp = nil
+        if restorePreviousApp, let app = captured {
+            app.activate(options: [])
+        }
+    }
+
+    func notchPop() {
+        guard status == .closed else { return }
+        status = .popping
+    }
+
+    func notchUnpop() {
+        guard status == .popping else { return }
+        status = .closed
+    }
+
+    func toggleMenu() {
+        // See `pushTo` — same reset applies when leaving agents via
+        // the menu toggle (top-left chevron/xmark).
+        if self.contentType == .agents {
+            agentsClaudeDirPickerExpanded = false
+            agentsContentHeight = agentsBaseHeight
+        }
+        contentType = contentType == .menu ? .instances : .menu
+    }
+
+    /// Mouse click on the closed notch — restore chat if available, otherwise instances.
+    func handleNotchTap() {
+        notchOpen(reason: .click)
+    }
+
+    func showChat(for session: SessionState) {
+        // Avoid unnecessary updates if already showing this chat
+        if case .chat(let current) = contentType, current.sessionId == session.sessionId {
+            return
+        }
+        contentType = .chat(session)
+    }
+
+    /// Go back to instances list and clear saved chat state
+    func exitChat() {
+        keyboardActivateTrigger = nil
+        currentChatSession = nil
+        contentType = .instances
+    }
+
+    /// Push a sub-page onto the navigation stack.
+    /// If the stack is empty, records the current content type as the base for back navigation.
+    func pushTo(_ contentType: NotchContentType) {
+        // Reset transient agents-page state BEFORE the new View is
+        // created. Hooking into navigation (rather than the View's
+        // `onAppear` / `onChange`) guarantees the picker is closed by
+        // the time the new View's GeometryReader measures — otherwise
+        // the first measurement would snapshot the still-expanded
+        // picker height (base + 88) into `agentsBaseHeight`, and the
+        // panel would re-open at the expanded height with the picker
+        // closed (empty space at the bottom).
+        if self.contentType == .agents {
+            agentsClaudeDirPickerExpanded = false
+            agentsContentHeight = agentsBaseHeight
+        }
+        if navigationStack.isEmpty {
+            navigationStack.append(self.contentType)
+        }
+        navigationStack.append(contentType)
+        self.contentType = contentType
+        settingsFocusedIndex = -1
+    }
+
+    /// Navigate back from a sub-page (e.g. shortcuts) to the previous page
+    func navigateBack() {
+        keyboardActivateTrigger = nil
+        // See `pushTo` — same reset applies when leaving agents via Back.
+        if self.contentType == .agents {
+            agentsClaudeDirPickerExpanded = false
+            agentsContentHeight = agentsBaseHeight
+        }
+        guard !navigationStack.isEmpty else {
+            contentType = .instances
+            settingsFocusedIndex = -1
+            return
+        }
+        navigationStack.removeLast()
+        contentType = navigationStack.last ?? .instances
+        settingsFocusedIndex = -1
+    }
+
+    /// Select the previous item (session or settings row)
+    func selectPreviousItem() {
+        guard status == .opened else { return }
+        switch contentType {
+        case .instances:
+            guard instancesPageSessionCount > 0 else { return }
+            // If nothing selected (-1), select the last item
+            if keyboardSelectedIndex == -1 {
+                keyboardSelectedIndex = instancesPageSessionCount - 1
+            } else {
+                keyboardSelectedIndex = max(0, keyboardSelectedIndex - 1)
+            }
+        case .menu:
+            // If nothing selected (-1), select the last item
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = menuItemCount - 1
+            } else {
+                settingsFocusedIndex = max(0, settingsFocusedIndex - 1)
+            }
+        case .shortcuts:
+            // If nothing selected (-1), select the last item
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = shortcutsItemCount - 1
+            } else {
+                settingsFocusedIndex = max(0, settingsFocusedIndex - 1)
+            }
+        case .agents:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = agentsItemCount - 1
+            } else {
+                settingsFocusedIndex = max(0, settingsFocusedIndex - 1)
+            }
+        case .performance:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = performanceItemCount - 1
+            } else {
+                settingsFocusedIndex = max(0, settingsFocusedIndex - 1)
+            }
+        case .performanceSettings:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = performanceSettingsItemCount - 1
+            } else {
+                settingsFocusedIndex = max(0, settingsFocusedIndex - 1)
+            }
+        case .betaFeatures:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = BetaFeaturesSettingsLayout.itemCount - 1
+            } else {
+                settingsFocusedIndex = max(0, settingsFocusedIndex - 1)
+            }
+        case .chat:
+            // Chat scroll is handled by hardcoded keys in `ShortcutManager`
+            // (↑/↓/⌃F/⌃B/⌃G), independent of the settings-page shortcuts.
+            // ⌃N/P are "previous/next session" — semantically navigation,
+            // not scrolling — so they don't scroll chat here.
+            break
+        }
+    }
+
+    /// Select the next item (session or settings row)
+    func selectNextItem() {
+        guard status == .opened else { return }
+        switch contentType {
+        case .instances:
+            guard instancesPageSessionCount > 0 else { return }
+            // If nothing selected (-1), select the first item
+            if keyboardSelectedIndex == -1 {
+                keyboardSelectedIndex = 0
+            } else {
+                keyboardSelectedIndex = min(instancesPageSessionCount - 1, keyboardSelectedIndex + 1)
+            }
+        case .menu:
+            // If nothing selected (-1), select the first item
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = 0
+            } else {
+                settingsFocusedIndex = min(menuItemCount - 1, settingsFocusedIndex + 1)
+            }
+        case .shortcuts:
+            // If nothing selected (-1), select the first item
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = 0
+            } else {
+                settingsFocusedIndex = min(shortcutsItemCount - 1, settingsFocusedIndex + 1)
+            }
+        case .agents:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = 0
+            } else {
+                settingsFocusedIndex = min(agentsItemCount - 1, settingsFocusedIndex + 1)
+            }
+        case .performance:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = 0
+            } else {
+                settingsFocusedIndex = min(performanceItemCount - 1, settingsFocusedIndex + 1)
+            }
+        case .performanceSettings:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = 0
+            } else {
+                settingsFocusedIndex = min(performanceSettingsItemCount - 1, settingsFocusedIndex + 1)
+            }
+        case .betaFeatures:
+            if settingsFocusedIndex == -1 {
+                settingsFocusedIndex = 0
+            } else {
+                settingsFocusedIndex = min(
+                    BetaFeaturesSettingsLayout.itemCount - 1,
+                    settingsFocusedIndex + 1
+                )
+            }
+        case .chat:
+            // See `selectPreviousItem` — chat scroll is hardcoded in ShortcutManager.
+            break
+        }
+    }
+
+    /// Activate the currently keyboard-selected item
+    func activateSelectedItem() {
+        keyboardActivateTrigger = UUID()
+    }
+
+    /// Total focusable items in the menu page
+    let menuItemCount: Int = 15
+    /// Total focusable items in the shortcuts page (Back + action rows + Restore)
+    var shortcutsItemCount: Int { 1 + ShortcutAction.allCases.count + 1 }
+    /// Whether the Claude dir picker inside the Agents page is expanded.
+    /// Drives keyboard nav index range (2 picker options are inserted when
+    /// expanded, shifting hooks-toggle indices).
+    @Published var agentsClaudeDirPickerExpanded: Bool = false
+    /// Total focusable items on the Agents page.
+    ///
+    /// Layout: Back (0), Claude main (1), [Claude picker × 2 if expanded],
+    /// [Claude hooks if installed], Codex main, [Codex hooks if installed],
+    /// OpenCode main, [OpenCode hooks if installed], Cursor main,
+    /// [Cursor hooks if installed], Debug log.
+    /// Order follows the visual order of the page.
+    var agentsItemCount: Int {
+        var count = 1 + 1 + 1 + 1 + 1 + 1 // Back + Claude/Codex/OpenCode/Cursor main + Debug log
+        if agentsClaudeDirPickerExpanded { count += 2 }
+        if AgentPathsResolver.isInstalled(.claude)  { count += 1 }
+        if AgentPathsResolver.isInstalled(.codex)   { count += 1 }
+        if AgentPathsResolver.isInstalled(.opencode) { count += 1 }
+        if AgentPathsResolver.isInstalled(.cursor)  { count += 1 }
+        return count
+    }
+    /// Whether the "Visible Metrics" section is expanded in performance settings.
+    @Published var performanceSettingsMetricsExpanded: Bool = false
+    /// Total focusable items in the performance settings page.
+    /// Back + 2 toggles + 1 header + (4 sub-toggles when expanded).
+    var performanceSettingsItemCount: Int {
+        performanceSettingsMetricsExpanded ? 8 : 4
+    }
+    /// Total focusable items in the current performance page.
+    var performanceItemCount: Int {
+        if case .performance(.overview) = contentType {
+            return 1 + AppSettings.performanceVisibleSections.count
+        }
+        return 1
+    }
+
+    /// Route a shortcut action to the appropriate handler
+    func handleShortcutAction(_ action: ShortcutAction) {
+        switch action {
+        case .toggleNotch:
+            if status == .opened && !MenuBarOrganizer.shared.isExpanded {
+                notchClose(restorePreviousApp: true)
+            } else {
+                notchOpen(reason: .keyboard)
+            }
+        case .closeNotch:
+            notchClose(restorePreviousApp: true)
+        case .selectPrevious:
+            selectPreviousItem()
+        case .selectNext:
+            selectNextItem()
+        case .enterSession:
+            activateSelectedItem()
+        case .navigateBack:
+            navigateBack()
+        case .openSettings:
+            notchOpen(reason: .keyboard)
+            if contentType != .menu {
+                toggleMenu()
+            }
+        }
+    }
+
+    /// Perform boot animation: expand briefly then collapse
+    func performBootAnimation() {
+        notchOpen(reason: .boot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self, self.openReason == .boot else { return }
+            self.notchClose()
+        }
+    }
+}

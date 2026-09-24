@@ -1,0 +1,464 @@
+//
+//  Settings.swift
+//  Lumora
+//
+//  App settings manager using UserDefaults
+//
+
+import CryptoKit
+import Foundation
+
+/// Available notification sounds
+enum NotificationSound: String, CaseIterable {
+    case none = "None"
+    case pop = "Pop"
+    case ping = "Ping"
+    case tink = "Tink"
+    case glass = "Glass"
+    case blow = "Blow"
+    case bottle = "Bottle"
+    case frog = "Frog"
+    case funk = "Funk"
+    case hero = "Hero"
+    case morse = "Morse"
+    case purr = "Purr"
+    case sosumi = "Sosumi"
+    case submarine = "Submarine"
+    case basso = "Basso"
+
+    var displayName: String {
+        switch self {
+        case .none: return String(localized: "None")
+        case .pop: return String(localized: "Pop")
+        case .ping: return String(localized: "Ping")
+        case .tink: return String(localized: "Tink")
+        case .glass: return String(localized: "Glass")
+        case .blow: return String(localized: "Blow")
+        case .bottle: return String(localized: "Bottle")
+        case .frog: return String(localized: "Frog")
+        case .funk: return String(localized: "Funk")
+        case .hero: return String(localized: "Hero")
+        case .morse: return String(localized: "Morse")
+        case .purr: return String(localized: "Purr")
+        case .sosumi: return String(localized: "Sosumi")
+        case .submarine: return String(localized: "Submarine")
+        case .basso: return String(localized: "Basso")
+        }
+    }
+
+    /// The system sound name to use with NSSound, or nil for no sound
+    var soundName: String? {
+        self == .none ? nil : rawValue
+    }
+}
+
+enum NotchAppearanceStyle: String, CaseIterable, Identifiable {
+    case liquidGlass
+    case adaptiveArtwork
+    case pureBlack
+
+    nonisolated var id: String { rawValue }
+
+    nonisolated static var availableCases: [NotchAppearanceStyle] {
+        if #available(macOS 26.0, *) {
+            return allCases
+        }
+        return allCases.filter { $0 != .liquidGlass }
+    }
+
+    nonisolated var resolvedForCurrentSystem: NotchAppearanceStyle {
+        if self == .liquidGlass {
+            if #available(macOS 26.0, *) {
+                return self
+            }
+            return .adaptiveArtwork
+        }
+        return self
+    }
+
+    nonisolated var displayName: String {
+        switch self {
+        case .liquidGlass: return String(localized: "Glass")
+        case .adaptiveArtwork: return String(localized: "Music")
+        case .pureBlack: return String(localized: "Black")
+        }
+    }
+}
+
+enum AppSettings {
+    private nonisolated(unsafe) static let defaults = UserDefaults.standard
+    nonisolated static let notchAppearanceStyleKey = "notchAppearanceStyle"
+    nonisolated static let artworkAdaptiveBackgroundEnabledKey = "artworkAdaptiveBackgroundEnabled"
+    nonisolated static let musicEdgeGlowEnabledKey = "musicEdgeGlowEnabled"
+    nonisolated static let musicAudioReactiveGlowEnabledKey = "musicAudioReactiveGlowEnabled"
+    nonisolated static let musicAudioCaptureWasGrantedKey = "musicAudioCaptureWasGranted"
+    nonisolated static let vibeGlowEnabledKey = "vibeGlowEnabled"
+    nonisolated static let performanceMonitorEnabledKey = "performanceMonitorEnabled"
+    nonisolated static let musicAbovePerformanceKey = "musicAbovePerformance"
+    nonisolated static let performanceVisibleSectionsKey = "performanceVisibleSections"
+    nonisolated static let shortcutsKey = "lumora_shortcut_bindings"
+
+    // MARK: - Keys
+
+    private enum Keys {
+        nonisolated static let notificationSound = "notificationSound"
+        nonisolated static let claudeDirectoryName = "claudeDirectoryName"
+        nonisolated static let notchAppearanceStyle = AppSettings.notchAppearanceStyleKey
+        nonisolated static let artworkAdaptiveBackgroundEnabled = AppSettings.artworkAdaptiveBackgroundEnabledKey
+        nonisolated static let musicEdgeGlowEnabled = AppSettings.musicEdgeGlowEnabledKey
+        nonisolated static let musicAudioReactiveGlowEnabled = AppSettings.musicAudioReactiveGlowEnabledKey
+        nonisolated static let musicAudioCaptureWasGranted = AppSettings.musicAudioCaptureWasGrantedKey
+        nonisolated static let musicAudioCaptureDebugBuildFingerprint = "musicAudioCaptureDebugBuildFingerprint"
+        nonisolated static let vibeGlowEnabled = AppSettings.vibeGlowEnabledKey
+        nonisolated static let performanceMonitorEnabled = AppSettings.performanceMonitorEnabledKey
+        nonisolated static let musicAbovePerformance = AppSettings.musicAbovePerformanceKey
+        nonisolated static let performanceVisibleSections = AppSettings.performanceVisibleSectionsKey
+        nonisolated static let autoInstallHooks = "autoInstallHooks"
+        nonisolated static let claudeHooksEnabled = "claudeHooksEnabled"
+        nonisolated static let codexHooksEnabled = "codexHooksEnabled"
+        nonisolated static let opencodeHooksEnabled = "opencodeHooksEnabled"
+        nonisolated static let cursorHooksEnabled = "cursorHooksEnabled"
+        nonisolated static let debugLogEnabled = "debugLogEnabled"
+    }
+
+    nonisolated static func registerDefaults() {
+        if Bundle.main.bundleIdentifier == "com.conbenksl.lumora" {
+            migrateLegacyPreferencesIfNeeded(
+                using: defaults,
+                from: ["com.conbenksl.lingyu", "com.oaimgo.nook"],
+                to: "com.conbenksl.lumora"
+            )
+        }
+        migrateNotchAppearanceStyleIfNeeded()
+        disableAutomaticAudioCaptureForNewDebugBuildIfNeeded()
+        defaults.register(defaults: [
+            Keys.artworkAdaptiveBackgroundEnabled: true,
+            Keys.musicEdgeGlowEnabled: false,
+            Keys.musicAudioReactiveGlowEnabled: false,
+            Keys.musicAudioCaptureWasGranted: false,
+            Keys.vibeGlowEnabled: false,
+            Keys.performanceMonitorEnabled: true,
+            Keys.musicAbovePerformance: false,
+            Keys.performanceVisibleSections: "cpu,memory,battery,network",
+            Keys.autoInstallHooks: true,
+            Keys.claudeHooksEnabled: true,
+            Keys.codexHooksEnabled: true,
+            Keys.opencodeHooksEnabled: false,
+            Keys.cursorHooksEnabled: true,
+            Keys.debugLogEnabled: false,
+        ])
+    }
+
+    /// Copy only app preferences once. Permissions and analytics identity belong
+    /// to the new app; they must not be carried across bundle identifiers.
+    nonisolated static func migrateLegacyPreferencesIfNeeded(
+        using preferences: UserDefaults,
+        from legacyDomains: [String],
+        to destinationDomain: String
+    ) {
+        let sourceDomains = legacyDomains.filter { $0 != destinationDomain }
+        guard !sourceDomains.isEmpty else { return }
+        let migrationKey = "lumoraDidMigratePreviousPreferences"
+        var destination = preferences.persistentDomain(forName: destinationDomain) ?? [:]
+        guard destination[migrationKey] as? Bool != true else { return }
+        // Prefer the most recent fork as a whole. Mixing older per-key values
+        // into it could restore settings the user deliberately reset there.
+        let legacy = sourceDomains.lazy.compactMap {
+            preferences.persistentDomain(forName: $0)
+        }.first(where: { !$0.isEmpty }) ?? [:]
+        let keys = [
+            Keys.notificationSound, Keys.claudeDirectoryName,
+            Keys.notchAppearanceStyle, Keys.artworkAdaptiveBackgroundEnabled,
+            Keys.musicEdgeGlowEnabled, Keys.vibeGlowEnabled,
+            Keys.performanceMonitorEnabled, Keys.musicAbovePerformance,
+            Keys.performanceVisibleSections, Keys.autoInstallHooks,
+            Keys.claudeHooksEnabled, Keys.codexHooksEnabled,
+            Keys.opencodeHooksEnabled, Keys.cursorHooksEnabled,
+            Keys.debugLogEnabled,
+            "screenSelectionMode", "selectedScreenIdentifier",
+        ]
+        for key in keys where destination[key] == nil {
+            destination[key] = legacy[key]
+        }
+        if destination[shortcutsKey] == nil {
+            destination[shortcutsKey] = legacy["nook_shortcut_bindings"]
+        }
+        if destination["menuBarOrganizerEnabled"] == nil,
+           legacy["menuBarOrganizerEnabled"] != nil {
+            // Accessibility consent belongs to each app identity. Starting
+            // avoidance without Lumora's own consent would hide the whole UI.
+            // The user can enable it after authorizing the new application.
+            destination["menuBarOrganizerEnabled"] = false
+        }
+        destination[migrationKey] = true
+        preferences.setPersistentDomain(destination, forName: destinationDomain)
+    }
+
+    /// Ad-hoc debug signatures identify one exact build, so TCC can ask again
+    /// after every rebuild. Avoid surprising users with an automatic prompt at
+    /// launch; the audio-reactive Beta must be enabled explicitly once instead.
+    private nonisolated static func disableAutomaticAudioCaptureForNewDebugBuildIfNeeded() {
+        #if DEBUG
+        guard defaults.bool(forKey: Keys.musicAudioReactiveGlowEnabled),
+              let currentFingerprint = musicAudioCaptureDebugBuildFingerprint,
+              defaults.string(forKey: Keys.musicAudioCaptureDebugBuildFingerprint) != currentFingerprint else {
+            return
+        }
+        defaults.set(false, forKey: Keys.musicAudioReactiveGlowEnabled)
+        #endif
+    }
+
+    private nonisolated static func migrateNotchAppearanceStyleIfNeeded() {
+        guard defaults.object(forKey: Keys.notchAppearanceStyle) == nil else { return }
+
+        let legacyArtworkEnabled: Bool
+        if defaults.object(forKey: Keys.artworkAdaptiveBackgroundEnabled) == nil {
+            legacyArtworkEnabled = true
+            defaults.set(true, forKey: Keys.artworkAdaptiveBackgroundEnabled)
+        } else {
+            legacyArtworkEnabled = defaults.bool(forKey: Keys.artworkAdaptiveBackgroundEnabled)
+        }
+
+        let migratedStyle: NotchAppearanceStyle = legacyArtworkEnabled ? .adaptiveArtwork : .pureBlack
+        defaults.set(migratedStyle.rawValue, forKey: Keys.notchAppearanceStyle)
+    }
+
+    // MARK: - Notification Sound
+
+    /// The sound to play when Claude finishes and is ready for input
+    nonisolated static var notificationSound: NotificationSound {
+        get {
+            guard let rawValue = defaults.string(forKey: Keys.notificationSound),
+                  let sound = NotificationSound(rawValue: rawValue) else {
+                return .pop // Default to Pop
+            }
+            return sound
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.notificationSound)
+        }
+    }
+
+    // MARK: - Claude Directory
+
+    /// The name of the Claude config directory under the user's home folder.
+    /// Defaults to ".claude" (standard Claude Code installation).
+    /// Change to ".claude-internal" (or similar) for enterprise/custom distributions.
+    nonisolated static var claudeDirectoryName: String {
+        get {
+            let value = defaults.string(forKey: Keys.claudeDirectoryName) ?? ""
+            return value.isEmpty ? ".claude" : value
+        }
+        set {
+            defaults.set(newValue.trimmingCharacters(in: .whitespaces), forKey: Keys.claudeDirectoryName)
+        }
+    }
+
+    // MARK: - Artwork Adaptive Background
+
+    nonisolated static var notchAppearanceStyle: NotchAppearanceStyle {
+        get {
+            if let rawValue = defaults.string(forKey: Keys.notchAppearanceStyle),
+               let style = NotchAppearanceStyle(rawValue: rawValue) {
+                return style.resolvedForCurrentSystem
+            }
+            return artworkAdaptiveBackgroundEnabled ? .adaptiveArtwork : .pureBlack
+        }
+        set {
+            let resolvedStyle = newValue.resolvedForCurrentSystem
+            defaults.set(resolvedStyle.rawValue, forKey: Keys.notchAppearanceStyle)
+            defaults.set(resolvedStyle == .adaptiveArtwork, forKey: Keys.artworkAdaptiveBackgroundEnabled)
+        }
+    }
+
+    /// Controls whether the notch artwork background adapts to the current artwork.
+    /// Defaults to enabled.
+    nonisolated static var artworkAdaptiveBackgroundEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.artworkAdaptiveBackgroundEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.artworkAdaptiveBackgroundEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.artworkAdaptiveBackgroundEnabled)
+            defaults.set(
+                (newValue ? NotchAppearanceStyle.adaptiveArtwork : .pureBlack).rawValue,
+                forKey: Keys.notchAppearanceStyle
+            )
+        }
+    }
+
+    // MARK: - Music Edge Glow
+
+    /// Controls whether the decorative edge glow is shown when music is playing.
+    /// This permission-free master switch uses the fixed breathing animation
+    /// unless the separate audio-reactive Beta is enabled and running.
+    nonisolated static var musicEdgeGlowEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.musicEdgeGlowEnabled) == nil {
+                return false
+            }
+            return defaults.bool(forKey: Keys.musicEdgeGlowEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.musicEdgeGlowEnabled)
+        }
+    }
+
+    /// Opts in to system-audio analysis for Music Edge Glow. This remains
+    /// separate from the visual master switch so ordinary glow never requests
+    /// capture permission and can always fall back to its simulated animation.
+    nonisolated static var musicAudioReactiveGlowEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.musicAudioReactiveGlowEnabled) == nil {
+                return false
+            }
+            return defaults.bool(forKey: Keys.musicAudioReactiveGlowEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.musicAudioReactiveGlowEnabled)
+        }
+    }
+
+    /// Records only that capture succeeded before, so repeat toggles can skip
+    /// the educational alert. It is not treated as a permission preflight:
+    /// every enable still has to start a real Core Audio tap successfully.
+    nonisolated static var musicAudioCaptureWasGranted: Bool {
+        get { defaults.bool(forKey: Keys.musicAudioCaptureWasGranted) }
+        set { defaults.set(newValue, forKey: Keys.musicAudioCaptureWasGranted) }
+    }
+
+    /// Marks this exact Debug build as safe to resume automatically. Release
+    /// builds rely on their stable development/distribution signature instead.
+    nonisolated static func markMusicAudioCaptureGrantedForCurrentBuild() {
+        musicAudioCaptureWasGranted = true
+        #if DEBUG
+        defaults.set(
+            musicAudioCaptureDebugBuildFingerprint,
+            forKey: Keys.musicAudioCaptureDebugBuildFingerprint
+        )
+        #endif
+    }
+
+    private nonisolated static var musicAudioCaptureDebugBuildFingerprint: String? {
+        #if DEBUG
+        let bundleURL = Bundle.main.bundleURL
+        let debugLibrary = bundleURL.appendingPathComponent("Contents/MacOS/Lumora.debug.dylib")
+        let codeURL = FileManager.default.fileExists(atPath: debugLibrary.path)
+            ? debugLibrary
+            : Bundle.main.executableURL
+        guard let codeURL,
+              let codeData = try? Data(contentsOf: codeURL, options: .mappedIfSafe) else {
+            return nil
+        }
+        return SHA256.hash(data: codeData).map { String(format: "%02x", $0) }.joined()
+        #else
+        return nil
+        #endif
+    }
+
+    // MARK: - Vibe Glow
+
+    /// Controls whether the closed notch uses the continuous vibe glow.
+    /// Defaults to disabled so the closed-state activity UI remains unchanged.
+    nonisolated static var vibeGlowEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.vibeGlowEnabled) == nil {
+                return false
+            }
+            return defaults.bool(forKey: Keys.vibeGlowEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.vibeGlowEnabled)
+        }
+    }
+
+    // MARK: - Performance Monitor
+
+    /// Controls whether the compact performance monitor row is shown on the home page.
+    /// Defaults to enabled.
+    nonisolated static var performanceMonitorEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.performanceMonitorEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.performanceMonitorEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.performanceMonitorEnabled)
+        }
+    }
+
+    // MARK: - Music Above Performance
+
+    /// Controls whether the music card renders above the performance row on the
+    /// instances page. Defaults to false (performance on top).
+    nonisolated static var musicAbovePerformance: Bool {
+        get {
+            if defaults.object(forKey: Keys.musicAbovePerformance) == nil {
+                return false
+            }
+            return defaults.bool(forKey: Keys.musicAbovePerformance)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.musicAbovePerformance)
+        }
+    }
+
+    // MARK: - Performance Visible Sections
+
+    /// The performance sections shown as cards on the overview page and as tiles
+    /// on the instances-page summary row. Stored as a comma-separated string of
+    /// raw values, always returned in the fixed enum order.
+    nonisolated static var performanceVisibleSections: [PerformanceSection] {
+        get {
+            let raw = defaults.string(forKey: Keys.performanceVisibleSections) ?? "cpu,memory,battery,network"
+            let set = Set(raw.split(separator: ",").map { String($0) })
+            let result = PerformanceSection.detailAll.filter { set.contains($0.rawValue) }
+            // Defensive: if fewer than 2 visible (corrupted store), fall back to all.
+            return result.count >= 2 ? result : PerformanceSection.detailAll
+        }
+        set {
+            let raw = newValue.map(\.rawValue).joined(separator: ",")
+            defaults.set(raw, forKey: Keys.performanceVisibleSections)
+        }
+    }
+
+    // MARK: - Agent Hooks
+
+    /// Whether to auto-install hooks at launch for agents with hooks enabled.
+    nonisolated static var autoInstallHooks: Bool {
+        get { defaults.bool(forKey: Keys.autoInstallHooks) }
+        set { defaults.set(newValue, forKey: Keys.autoInstallHooks) }
+    }
+
+    nonisolated static var claudeHooksEnabled: Bool {
+        get { defaults.bool(forKey: Keys.claudeHooksEnabled) }
+        set { defaults.set(newValue, forKey: Keys.claudeHooksEnabled) }
+    }
+
+    nonisolated static var codexHooksEnabled: Bool {
+        get { defaults.bool(forKey: Keys.codexHooksEnabled) }
+        set { defaults.set(newValue, forKey: Keys.codexHooksEnabled) }
+    }
+
+    nonisolated static var opencodeHooksEnabled: Bool {
+        get { defaults.bool(forKey: Keys.opencodeHooksEnabled) }
+        set { defaults.set(newValue, forKey: Keys.opencodeHooksEnabled) }
+    }
+
+    nonisolated static var cursorHooksEnabled: Bool {
+        get { defaults.bool(forKey: Keys.cursorHooksEnabled) }
+        set { defaults.set(newValue, forKey: Keys.cursorHooksEnabled) }
+    }
+
+    /// When true, internal log output is mirrored to
+    /// `/tmp/lumora-debug.log` (single 10 MB rolling file, recreated
+    /// on every app launch). Default off; intended as a
+    /// diagnostic toggle for hook/socket issues.
+    nonisolated static var debugLogEnabled: Bool {
+        get { defaults.bool(forKey: Keys.debugLogEnabled) }
+        set { defaults.set(newValue, forKey: Keys.debugLogEnabled) }
+    }
+}
