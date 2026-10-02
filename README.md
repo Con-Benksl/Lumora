@@ -82,6 +82,12 @@ See [docs/testing.md](./docs/testing.md) for testing notes. Lumora release notes
 - `Lumora/Services/System`: performance sampling.
 - `Lumora/UI`: notch shell, session list, chat detail, music, performance, and settings views.
 
+## Development and AI disclosure
+
+AI tools wrote the code. I completed all other aspects of the project, including defining the architecture and making technical decisions.
+
+Here, “I” refers to the project author.
+
 ## Acknowledgements
 
 Lumora is distributed under GPL-3.0. See [LICENSE](./LICENSE) and [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for applicable license and third-party notices.
